@@ -57,6 +57,18 @@ from utils.general import (
 from utils.torch_utils import copy_attr, smart_inference_mode
 
 
+class ChannelAlign(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ChannelAlign, self).__init__()
+        self.align_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+
+        # 初始化为近似单位矩阵
+        nn.init.eye_(self.align_conv.weight)  # 仅对 in_channels = out_channels 时有效
+
+    def forward(self, x):
+        return self.align_conv(x)
+
+
 def autopad(k, p=None, d=1):
     """
     Pads kernel to 'same' output shape, adjusting for optional dilation; returns padding size.
@@ -685,7 +697,7 @@ class DetectMultiBackend(nn.Module):
             im = im.permute(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
 
         if self.pt:  # PyTorch
-            y = self.model(im, augment=augment, visualize=visualize) if augment or visualize else self.model(im)
+            y = self.model(im, augment=augment, visualize=visualize) if augment or visualize else self.model(im, pkd_distillation=True)
         elif self.jit:  # TorchScript
             y = self.model(im)
         elif self.dnn:  # ONNX OpenCV DNN

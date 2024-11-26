@@ -48,6 +48,7 @@ from models.common import (
     GhostBottleneck,
     GhostConv,
     Proto,
+    ChannelAlign,
 )
 from models.experimental import MixConv2d
 from utils.autoanchor import check_anchor_order
@@ -92,8 +93,10 @@ class Detect(nn.Module):
     def forward(self, x):
         """Processes input through YOLOv5 layers, altering shape for detection: `x(bs, 3, ny, nx, 85)`."""
         z = []  # inference output
+        pkd_out = []
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
+            pkd_out.append(x[i])
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
@@ -113,7 +116,9 @@ class Detect(nn.Module):
                     y = torch.cat((xy, wh, conf), 4)
                 z.append(y.view(bs, self.na * nx * ny, self.no))
 
-        return x if self.training else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x)
+        # return x,pkd_out  if self.training else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x)
+        #TODO
+        return (x,pkd_out)  if self.training else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x, pkd_out)
 
     def _make_grid(self, nx=20, ny=20, i=0, torch_1_10=check_version(torch.__version__, "1.10.0")):
         """Generates a mesh grid for anchor boxes with optional compatibility for torch versions < 1.10."""
@@ -158,19 +163,31 @@ class BaseModel(nn.Module):
         """
         return self._forward_once(x, profile, visualize)  # single-scale inference, train
 
-    def _forward_once(self, x, profile=False, visualize=False):
+    def _forward_once(self, x, profile=False, visualize=False, pkd_distillation=True):
         """Performs a forward pass on the YOLOv5 model, enabling profiling and feature visualization options."""
         y, dt = [], []  # outputs
+        pkd_outlayers = [] # 三个特征金字塔输出
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
+            if m.i == 24:
+                if pkd_distillation:
+                    _,x, pkd_outlayers = m(x)
+                else:
+                    x, pkd_outlayers = m(x)
+            else:
+                x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
+            # if pkd_distillation and (m.i in [17,20,23]):
+            #     pkd_outlayers.append(x)
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
-        return x
+        if pkd_distillation:
+            return _, x, pkd_outlayers
+        else:
+            return x, pkd_outlayers
 
     def _profile_one_layer(self, m, x, dt):
         """Profiles a single layer's performance by computing GFLOPs, execution time, and parameters."""
@@ -252,7 +269,7 @@ class DetectionModel(BaseModel):
 
             s = 256  # 2x min stride
             m.inplace = self.inplace
-            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x[0].shape[-2] for x in _forward(torch.zeros(1, ch, s, s))[0]])  # forward
             check_anchor_order(m)
             m.anchors /= m.stride.view(-1, 1, 1)
             self.stride = m.stride
@@ -263,11 +280,11 @@ class DetectionModel(BaseModel):
         self.info()
         LOGGER.info("")
 
-    def forward(self, x, augment=False, profile=False, visualize=False):
+    def forward(self, x, augment=False, profile=False, visualize=False, pkd_distillation=False):
         """Performs single-scale or augmented inference and may include profiling or visualization."""
         if augment:
             return self._forward_augment(x)  # augmented inference, None
-        return self._forward_once(x, profile, visualize)  # single-scale inference, train
+        return self._forward_once(x, profile, visualize, pkd_distillation)  # single-scale inference, train
 
     def _forward_augment(self, x):
         """Performs augmented inference across different scales and flips, returning combined detections."""

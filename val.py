@@ -338,7 +338,11 @@ def run(
 
         # Inference
         with dt[1]:
-            preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
+            if compute_loss:
+                preds, train_out,_ = model(im, pkd_distillation=True)
+            else:
+                preds, train_out = (model(im, augment=augment)[0], None)
+            # preds, train_out = model(im, pkd_distillation=True) if compute_loss else (model(im, augment=augment)[0], None)
 
         # Loss
         if compute_loss:
@@ -515,8 +519,8 @@ def parse_opt():
         Additional options include saving results in different formats, selecting devices, and more.
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
-    parser.add_argument("--weights", nargs="+", type=str, default=ROOT / "yolov5s.pt", help="model path(s)")
+    parser.add_argument("--data", type=str, default=ROOT / "data/crowdhuman.yaml", help="dataset.yaml path")
+    parser.add_argument("--weights", nargs="+", type=str, default='runs/train/v5m_crowd_0.85/weights/best.pt', help="model path(s)")
     parser.add_argument("--batch-size", type=int, default=32, help="batch size")
     parser.add_argument("--imgsz", "--img", "--img-size", type=int, default=640, help="inference size (pixels)")
     parser.add_argument("--conf-thres", type=float, default=0.001, help="confidence threshold")

@@ -1500,7 +1500,7 @@ def parse_opt(known=False):
         ```
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
+    parser.add_argument("--data", type=str, default=ROOT / "data/crowdhuman.yaml", help="dataset.yaml path")
     parser.add_argument("--weights", nargs="+", type=str, default=ROOT / "yolov5s.pt", help="model.pt path(s)")
     parser.add_argument("--imgsz", "--img", "--img-size", nargs="+", type=int, default=[640, 640], help="image (h, w)")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
@@ -1527,7 +1527,7 @@ def parse_opt(known=False):
     parser.add_argument(
         "--include",
         nargs="+",
-        default=["torchscript"],
+        default=["onnx"],
         help="torchscript, onnx, openvino, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle",
     )
     opt = parser.parse_known_args()[0] if known else parser.parse_args()

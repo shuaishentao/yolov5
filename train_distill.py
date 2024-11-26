@@ -47,6 +47,7 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 import val as validate  # for end-of-epoch mAP
 from models.experimental import attempt_load
 from models.yolo import Model
+from models.common import ChannelAlign
 from utils.autoanchor import check_anchors
 from utils.autobatch import check_train_batch_size
 from utils.callbacks import Callbacks
@@ -80,7 +81,7 @@ from utils.general import (
 )
 from utils.loggers import LOGGERS, Loggers
 from utils.loggers.comet.comet_utils import check_comet_resume
-from utils.loss import ComputeLoss
+from utils.loss import ComputeLoss, compute_distillation_output_loss, pkd_loss, CRDLoss
 from utils.metrics import fitness
 from utils.plots import plot_evolve
 from utils.torch_utils import (
@@ -134,11 +135,12 @@ def train(hyp, opt, device, callbacks):
         - Datasets: https://github.com/ultralytics/yolov5/tree/master/data
         - Tutorial: https://docs.ultralytics.com/yolov5/tutorials/train_custom_data
     """
-    save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = (
+    save_dir, epochs, batch_size, weights, teacherweights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = (
         Path(opt.save_dir),
         opt.epochs,
         opt.batch_size,
         opt.weights,
+        opt.teacherweights,
         opt.single_cls,
         opt.evolve,
         opt.data,
@@ -222,6 +224,16 @@ def train(hyp, opt, device, callbacks):
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
     amp = check_amp(model)  # check AMP
+
+    #TeacherModel
+    teacherckpt = torch.load(teacherweights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
+    teachermodel = Model(teacherckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
+    teachercsd = teacherckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
+    teachercsd = intersect_dicts(teachercsd, teachermodel.state_dict())  # intersect
+    teachermodel.load_state_dict(teachercsd, strict=False)  # load
+    LOGGER.info(f"Transferred {len(teachercsd)}/{len(teachermodel.state_dict())} items from {teacherweights}")  # report
+    
+
 
     # Freeze
     freeze = [f"model.{x}." for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
@@ -355,6 +367,7 @@ def train(hyp, opt, device, callbacks):
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(model)  # init loss class
+    kd_crd_loss_fn = CRDLoss(temperature=0.3).to(device=device)
     callbacks.run("on_train_start")
     LOGGER.info(
         f'Image sizes {imgsz} train, {imgsz} val\n'
@@ -365,6 +378,8 @@ def train(hyp, opt, device, callbacks):
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run("on_train_epoch_start")
         model.train()
+        with torch.no_grad():
+            teachermodel.eval()
 
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
@@ -410,8 +425,25 @@ def train(hyp, opt, device, callbacks):
 
             # Forward
             with torch.cuda.amp.autocast(amp):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                pred, pkd_outlayers_stu = model(imgs,pkd_distillation=False)  # forward
+                with torch.no_grad():
+                    _, teacherpred, pkd_outlayers_tea = teachermodel(imgs,pkd_distillation=True)
+
+                # test_1 output_loss
+                # distill_loss = compute_distillation_output_loss(pred, teacherpred[1], model, d_weight=1.5)
+                # test_2 pkd_loss
+                # distill_loss = pkd_loss(pkd_outlayers_stu, pkd_outlayers_tea)
+                # test_3 crd+loss
+                positive_indices = torch.arange(imgs.size(0))
+                distill_loss = 0
+                for d in range(len(pkd_outlayers_stu)):
+                    distill_loss += kd_crd_loss_fn(pkd_outlayers_stu[d], pkd_outlayers_tea[d], positive_indices)
+                distill_loss /= len(pkd_outlayers_stu)
+
+                
+
+                s_loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                loss = distill_loss + s_loss
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -565,11 +597,12 @@ def parse_opt(known=False):
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=str, default=ROOT / "yolov5n.pt", help="initial weights path")
+    parser.add_argument("--teacherweights", type=str, default=ROOT / "runs/train/v5m_crowd_0.85/weights/best.pt", help="initial weights path")
     parser.add_argument("--cfg", type=str, default="", help="model.yaml path")
     parser.add_argument("--data", type=str, default=ROOT / "data/crowdhuman.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
     parser.add_argument("--epochs", type=int, default=300, help="total training epochs")
-    parser.add_argument("--batch-size", type=int, default=16, help="total batch size for all GPUs, -1 for autobatch")
+    parser.add_argument("--batch-size", type=int, default=8, help="total batch size for all GPUs, -1 for autobatch")
     parser.add_argument("--imgsz", "--img", "--img-size", type=int, default=640, help="train, val image size (pixels)")
     parser.add_argument("--rect", action="store_true", help="rectangular training")
     parser.add_argument("--resume", nargs="?", const=True, default=False, help="resume most recent training")
